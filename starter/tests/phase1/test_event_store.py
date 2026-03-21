@@ -111,7 +111,7 @@ async def test_load_all_yields_all_events_globally():
 @pytest.mark.asyncio
 async def test_checkpoints_persist():
     store = InMemoryEventStore()
-    assert await store.load_checkpoint("proj_a") == 0  # default
+    assert await store.load_checkpoint("proj_a") == -1  # no checkpoint yet
     await store.save_checkpoint("proj_a", 42)
     assert await store.load_checkpoint("proj_a") == 42
 

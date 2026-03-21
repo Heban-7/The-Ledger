@@ -123,7 +123,8 @@ class LoanApplicationAggregate:
         confidence = p.get("confidence") or p.get("confidence_score")
         if confidence is not None and float(confidence) < 0.6 and rec != "REFER":
             raise DomainError("confidence < 0.6 requires recommendation=REFER", rule="confidence_floor")
-        self._transition(ApplicationState.PENDING_DECISION)
+        if self.state == ApplicationState.COMPLIANCE_CHECK_COMPLETE:
+            self._transition(ApplicationState.PENDING_DECISION)
         amt = p.get("approved_amount_usd")
         if amt is not None:
             self.approved_amount_usd = float(amt)
@@ -141,7 +142,14 @@ class LoanApplicationAggregate:
             self.approved_amount_usd = float(amt)
 
     def _on_ApplicationDeclined(self, p: dict) -> None:
-        self._transition(ApplicationState.DECLINED)
+        reasons = p.get("decline_reasons", [])
+        codes = p.get("adverse_action_codes", [])
+        if "COMPLIANCE_BLOCK" in codes or any("Compliance" in str(r) for r in reasons):
+            if self.state == ApplicationState.COMPLIANCE_CHECK_REQUESTED:
+                self.state = ApplicationState.COMPLIANCE_CHECK_COMPLETE
+            self._transition(ApplicationState.DECLINED_COMPLIANCE)
+        else:
+            self._transition(ApplicationState.DECLINED)
 
     def _transition(self, target: ApplicationState) -> None:
         if self.state == ApplicationState.NEW:

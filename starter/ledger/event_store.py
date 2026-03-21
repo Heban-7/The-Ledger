@@ -246,6 +246,36 @@ class EventStore:
                 return None
             return StreamMetadata.from_row(dict(row))
 
+    async def save_checkpoint(self, projection_name: str, position: int) -> None:
+        """Save projection checkpoint."""
+        if not self._pool:
+            raise RuntimeError("EventStore not connected")
+        now = datetime.now(timezone.utc)
+        await self._pool.execute(
+            "INSERT INTO projection_checkpoints(projection_name, last_position, updated_at) VALUES($1, $2, $3) "
+            "ON CONFLICT (projection_name) DO UPDATE SET last_position = $2, updated_at = $3",
+            projection_name,
+            position,
+            now,
+        )
+
+    async def load_checkpoint(self, projection_name: str) -> int:
+        """Load projection checkpoint. Returns -1 if none (process from start)."""
+        if not self._pool:
+            raise RuntimeError("EventStore not connected")
+        row = await self._pool.fetchrow(
+            "SELECT last_position FROM projection_checkpoints WHERE projection_name = $1",
+            projection_name,
+        )
+        return int(row["last_position"]) if row else -1
+
+    async def get_max_global_position(self) -> int:
+        """Returns the highest global_position in events. For lag calculation."""
+        if not self._pool:
+            raise RuntimeError("EventStore not connected")
+        row = await self._pool.fetchrow("SELECT COALESCE(MAX(global_position), 0) AS mx FROM events")
+        return int(row["mx"]) if row else 0
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # InMemoryEventStore — for tests only
@@ -373,4 +403,7 @@ class InMemoryEventStore:
         self._checkpoints[projection_name] = position
 
     async def load_checkpoint(self, projection_name: str) -> int:
-        return self._checkpoints.get(projection_name, 0)
+        return self._checkpoints.get(projection_name, -1)
+
+    async def get_max_global_position(self) -> int:
+        return len(self._global) - 1 if self._global else 0
