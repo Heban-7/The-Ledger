@@ -1,0 +1,27 @@
+[project]
+name = "the-ledger"
+version = "0.1.0"
+description = "Agentic event store and enterprise audit infrastructure"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "asyncpg",
+    "anthropic",
+    "pydantic>=2",
+    "langgraph",
+    "faker",
+    "reportlab",
+    "openpyxl",
+    "fastmcp",
+    "python-dotenv",
+    "pytest",
+    "pytest-asyncio",
+]
+
+[tool.uv]
+dev-dependencies = []
+
+[tool.pytest.ini_options]
+pythonpath = ["starter"]
+testpaths = ["starter/tests"]
+asyncio_mode = "auto"

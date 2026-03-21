@@ -106,8 +106,8 @@ REGULATION_SET = {"REG-001", "REG-002", "REG-003", "REG-004", "REG-005", "REG-00
 async def handle_submit_application(cmd: SubmitApplicationCommand, store) -> tuple[str, int]:
     """Append ApplicationSubmitted and DocumentUploadRequested to loan stream."""
     stream_id = f"loan-{cmd.application_id}"
-    version = await store.stream_version(stream_id)
-    if version >= 0:
+    app = await LoanApplicationAggregate.load(store, cmd.application_id)
+    if app.version >= 0:
         from ledger.exceptions import DomainError
         raise DomainError(f"Application {cmd.application_id} already exists", rule="duplicate_application")
 
@@ -134,7 +134,7 @@ async def handle_submit_application(cmd: SubmitApplicationCommand, store) -> tup
             requested_by="system",
         ),
     ]
-    await store.append(stream_id, events, expected_version=-1)
+    await store.append(stream_id, events, expected_version=app.version)
     return stream_id, 1
 
 
@@ -171,6 +171,7 @@ async def handle_credit_analysis_completed(cmd: CreditAnalysisCompletedCommand, 
         completed_at=datetime.now(timezone.utc).isoformat(),
     )
 
+    # CreditRecord aggregate is not yet modeled, so stream version is source of truth.
     version = await store.stream_version(stream_id)
     positions = await store.append(
         stream_id,
@@ -203,6 +204,7 @@ async def handle_fraud_screening_completed(cmd: FraudScreeningCompletedCommand, 
         input_data_hash=cmd.input_data_hash,
         completed_at=datetime.now(timezone.utc).isoformat(),
     )
+    # FraudScreening aggregate is not yet modeled, so stream version is source of truth.
     version = await store.stream_version(stream_id)
     positions = await store.append(stream_id, [new_event], expected_version=version)
     return stream_id, positions[-1]
@@ -211,8 +213,8 @@ async def handle_fraud_screening_completed(cmd: FraudScreeningCompletedCommand, 
 async def handle_start_agent_session(cmd: StartAgentSessionCommand, store) -> tuple[str, int]:
     """Append AgentSessionStarted — Gas Town: required before any agent decision."""
     stream_id = f"agent-{cmd.agent_type}-{cmd.session_id}"
-    version = await store.stream_version(stream_id)
-    if version >= 0:
+    agent = await AgentSessionAggregate.load(store, cmd.agent_type, cmd.session_id)
+    if agent.version >= 0:
         from ledger.exceptions import DomainError
         raise DomainError(f"Session {cmd.session_id} already started", rule="duplicate_session")
 
@@ -228,7 +230,7 @@ async def handle_start_agent_session(cmd: StartAgentSessionCommand, store) -> tu
         context_token_count=cmd.context_token_count,
         started_at=datetime.now(timezone.utc).isoformat(),
     )
-    positions = await store.append(stream_id, [new_event], expected_version=-1)
+    positions = await store.append(stream_id, [new_event], expected_version=agent.version)
     return stream_id, positions[-1]
 
 
@@ -243,7 +245,8 @@ async def handle_compliance_check(cmd: ComplianceCheckCommand, store) -> tuple[s
     app.assert_awaiting_compliance()
 
     stream_id = f"compliance-{cmd.application_id}"
-    version = await store.stream_version(stream_id)
+    comp = await ComplianceRecordAggregate.load(store, cmd.application_id)
+    version = comp.version
 
     events = []
     if version < 0:
@@ -287,7 +290,6 @@ async def handle_compliance_check(cmd: ComplianceCheckCommand, store) -> tuple[s
         events.append(evt)
         if cmd.is_hard_block:
             loan_stream = f"loan-{cmd.application_id}"
-            loan_ver = await store.stream_version(loan_stream)
             await store.append(
                 loan_stream,
                 [
@@ -300,7 +302,7 @@ async def handle_compliance_check(cmd: ComplianceCheckCommand, store) -> tuple[s
                         declined_at=datetime.now(timezone.utc).isoformat(),
                     ),
                 ],
-                expected_version=loan_ver,
+                expected_version=app.version,
             )
 
     exp = -1 if version < 0 else version
@@ -330,7 +332,7 @@ async def handle_generate_decision(cmd: GenerateDecisionCommand, store) -> tuple
         raise DomainError(f"Invalid recommendation: {cmd.recommendation}", rule="invalid_recommendation")
 
     stream_id = f"loan-{cmd.application_id}"
-    version = await store.stream_version(stream_id)
+    version = app.version
 
     events = []
     if app.state == ApplicationState.COMPLIANCE_CHECK_REQUESTED:
@@ -406,7 +408,7 @@ async def handle_human_review_completed(cmd: HumanReviewCompletedCommand, store)
     app.assert_pending_human_review()
 
     stream_id = f"loan-{cmd.application_id}"
-    version = await store.stream_version(stream_id)
+    version = app.version
 
     dec = cmd.final_decision.upper()
     if dec not in ("APPROVE", "APPROVED", "DECLINE", "DECLINED"):
