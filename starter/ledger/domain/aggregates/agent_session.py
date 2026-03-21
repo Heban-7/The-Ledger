@@ -60,3 +60,8 @@ class AgentSessionAggregate:
                 f"Model version mismatch: session has {self.model_version}, got {model_version}",
                 rule="model_version",
             )
+
+    def assert_session_not_started(self) -> None:
+        """Duplicate AgentSessionStarted is not allowed for the same stream."""
+        if self.version >= 0:
+            raise DomainError(f"Session {self.session_id} already started", rule="duplicate_session")

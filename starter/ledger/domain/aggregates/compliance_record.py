@@ -67,3 +67,8 @@ class ComplianceRecordAggregate:
     def assert_no_hard_block(self) -> None:
         if self.has_hard_block:
             raise DomainError("Compliance hard block present", rule="no_hard_block")
+
+    def assert_ready_for_decision_generation(self) -> None:
+        """All mandatory checks evaluated and no hard block — single guard for decision commands."""
+        self.assert_all_checks_complete()
+        self.assert_no_hard_block()

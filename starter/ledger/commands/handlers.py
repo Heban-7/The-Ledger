@@ -17,9 +17,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 import uuid
 
-from ledger.domain.aggregates.loan_application import LoanApplicationAggregate, ApplicationState
+from ledger.domain.aggregates.loan_application import ApplicationState, LoanApplicationAggregate
 from ledger.domain.aggregates.agent_session import AgentSessionAggregate
 from ledger.domain.aggregates.compliance_record import ComplianceRecordAggregate
+from ledger.domain.regulation import assert_valid_rule_id
 
 
 def _ev(event_type: str, event_version: int = 1, **payload) -> dict:
@@ -147,10 +148,6 @@ class HumanReviewCompletedCommand:
     causation_id: str | None = None
 
 
-# Regulation set for compliance (rule_id must be in this set)
-REGULATION_SET = {"REG-001", "REG-002", "REG-003", "REG-004", "REG-005", "REG-006"}
-
-
 # ─── Handlers ─────────────────────────────────────────────────────────────────
 
 
@@ -160,9 +157,7 @@ async def handle_submit_application(cmd: SubmitApplicationCommand, store) -> tup
     cid = _correlation_id(cmd)
     cause = _causation_id(cmd)
     app = await LoanApplicationAggregate.load(store, cmd.application_id)
-    if app.version >= 0:
-        from ledger.exceptions import DomainError
-        raise DomainError(f"Application {cmd.application_id} already exists", rule="duplicate_application")
+    app.assert_can_submit_new_application()
 
     now = datetime.now(timezone.utc)
     events = [
@@ -287,9 +282,7 @@ async def handle_start_agent_session(cmd: StartAgentSessionCommand, store) -> tu
     cause = _causation_id(cmd)
     stream_id = f"agent-{cmd.agent_type}-{cmd.session_id}"
     agent = await AgentSessionAggregate.load(store, cmd.agent_type, cmd.session_id)
-    if agent.version >= 0:
-        from ledger.exceptions import DomainError
-        raise DomainError(f"Session {cmd.session_id} already started", rule="duplicate_session")
+    agent.assert_session_not_started()
 
     new_event = _ev(
         "AgentSessionStarted",
@@ -316,13 +309,10 @@ async def handle_start_agent_session(cmd: StartAgentSessionCommand, store) -> tu
 
 async def handle_compliance_check(cmd: ComplianceCheckCommand, store) -> tuple[str, int]:
     """Append ComplianceRulePassed or ComplianceRuleFailed to compliance stream."""
-    from ledger.exceptions import DomainError
-
     cid = _correlation_id(cmd)
     cause = _causation_id(cmd)
 
-    if cmd.rule_id not in REGULATION_SET:
-        raise DomainError(f"rule_id {cmd.rule_id} not in regulation set", rule="invalid_rule_id")
+    assert_valid_rule_id(cmd.rule_id)
 
     app = await LoanApplicationAggregate.load(store, cmd.application_id)
     app.assert_awaiting_compliance()
@@ -406,27 +396,16 @@ async def handle_compliance_check(cmd: ComplianceCheckCommand, store) -> tuple[s
 
 async def handle_generate_decision(cmd: GenerateDecisionCommand, store) -> tuple[str, int]:
     """Append DecisionGenerated; optionally ApplicationApproved/Declined or HumanReviewRequested."""
-    from ledger.exceptions import DomainError
-
     cid = _correlation_id(cmd)
     cause = _causation_id(cmd)
 
     app = await LoanApplicationAggregate.load(store, cmd.application_id)
-    if app.state not in (ApplicationState.COMPLIANCE_CHECK_REQUESTED, ApplicationState.COMPLIANCE_CHECK_COMPLETE, ApplicationState.PENDING_DECISION):
-        raise DomainError(
-            f"Application must be COMPLIANCE_CHECK_REQUESTED/COMPLETE or PENDING_DECISION, got {app.state}",
-            rule="state_machine",
-        )
+    app.assert_states_allowed_for_generate_decision()
     comp = await ComplianceRecordAggregate.load(store, cmd.application_id)
-    comp.assert_all_checks_complete()
-    comp.assert_no_hard_block()
+    comp.assert_ready_for_decision_generation()
+    app.assert_decision_recommendation_and_confidence(cmd.recommendation, cmd.confidence)
 
-    if cmd.confidence < 0.6 and cmd.recommendation != "REFER":
-        raise DomainError("confidence < 0.6 requires recommendation=REFER", rule="confidence_floor")
-
-    rec = cmd.recommendation.upper()
-    if rec not in ("APPROVE", "APPROVED", "DECLINE", "DECLINED", "REFER"):
-        raise DomainError(f"Invalid recommendation: {cmd.recommendation}", rule="invalid_recommendation")
+    rec = cmd.recommendation.strip().upper()
 
     stream_id = f"loan-{cmd.application_id}"
     version = app.version
@@ -503,23 +482,17 @@ async def handle_generate_decision(cmd: GenerateDecisionCommand, store) -> tuple
 
 async def handle_human_review_completed(cmd: HumanReviewCompletedCommand, store) -> tuple[str, int]:
     """Append HumanReviewCompleted and ApplicationApproved/Declined."""
-    from ledger.exceptions import DomainError
-
     cid = _correlation_id(cmd)
     cause = _causation_id(cmd)
 
-    if cmd.override and not cmd.override_reason:
-        raise DomainError("override=True requires override_reason", rule="override_reason_required")
-
     app = await LoanApplicationAggregate.load(store, cmd.application_id)
     app.assert_pending_human_review()
+    app.assert_human_review_command(cmd.final_decision, cmd.override, cmd.override_reason or "")
 
     stream_id = f"loan-{cmd.application_id}"
     version = app.version
 
-    dec = cmd.final_decision.upper()
-    if dec not in ("APPROVE", "APPROVED", "DECLINE", "DECLINED"):
-        raise DomainError(f"Invalid final_decision: {cmd.final_decision}", rule="invalid_decision")
+    dec = cmd.final_decision.strip().upper()
 
     events = [
         _ev(

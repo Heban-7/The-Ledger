@@ -205,3 +205,41 @@ class LoanApplicationAggregate:
                 f"Expected PENDING_HUMAN_REVIEW, got {self.state}",
                 rule="state_machine",
             )
+
+    def assert_can_submit_new_application(self) -> None:
+        """Only empty loan stream (version -1) may receive ApplicationSubmitted."""
+        if self.version >= 0:
+            raise DomainError(
+                f"Application {self.application_id} already exists",
+                rule="duplicate_application",
+            )
+
+    def assert_states_allowed_for_generate_decision(self) -> None:
+        """Loan app must be in a state where DecisionRequested / DecisionGenerated is legal."""
+        allowed = (
+            ApplicationState.COMPLIANCE_CHECK_REQUESTED,
+            ApplicationState.COMPLIANCE_CHECK_COMPLETE,
+            ApplicationState.PENDING_DECISION,
+        )
+        if self.state not in allowed:
+            raise DomainError(
+                f"Application must be COMPLIANCE_CHECK_REQUESTED, COMPLIANCE_CHECK_COMPLETE, or PENDING_DECISION, got {self.state}",
+                rule="state_machine",
+            )
+
+    def assert_decision_recommendation_and_confidence(self, recommendation: str, confidence: float) -> None:
+        """Business rule: low confidence forces REFER before events are appended."""
+        rec = recommendation.strip().upper()
+        allowed = ("APPROVE", "APPROVED", "DECLINE", "DECLINED", "REFER")
+        if rec not in allowed:
+            raise DomainError(f"Invalid recommendation: {recommendation}", rule="invalid_recommendation")
+        if confidence < 0.6 and rec != "REFER":
+            raise DomainError("confidence < 0.6 requires recommendation=REFER", rule="confidence_floor")
+
+    def assert_human_review_command(self, final_decision: str, override: bool, override_reason: str) -> None:
+        """Human review: override requires reason; final decision must be in allowed set."""
+        if override and not (override_reason or "").strip():
+            raise DomainError("override=True requires override_reason", rule="override_reason_required")
+        dec = final_decision.strip().upper()
+        if dec not in ("APPROVE", "APPROVED", "DECLINE", "DECLINED"):
+            raise DomainError(f"Invalid final_decision: {final_decision}", rule="invalid_decision")
