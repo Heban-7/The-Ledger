@@ -241,7 +241,37 @@ Specific assertions represented in this report:
 - `test_reconstruct_agent_context_after_events`: Gas Town reconstruction preserves actionable context
 - `test_full_lifecycle_via_tools`: MCP-only lifecycle path succeeds end-to-end
 
-Raw, visible test output for these assertions:
+#### 7.1.1 Double-decision concurrency — explicit required assertions
+
+`tests/test_concurrency.py::test_double_decision_exactly_one_succeeds` asserts **all** of the following (verified in code):
+
+| Assertion | Expected value | Meaning |
+|-----------|----------------|---------|
+| Final stream version | `4` | After 4 seed events (v0–v3), one append succeeds → current version is 4 |
+| Final event count (`len(load_stream)`) | `5` | Positions `0..4` — five persisted events |
+| Winning append returned positions | `[4]` | Winner’s new event is at `stream_position == 4` |
+| Loser `OptimisticConcurrencyError.expected` | `3` | Loser still used stale `expected_version=3` |
+| Loser `OptimisticConcurrencyError.actual` | `4` | Store advanced because winner committed first |
+| Loser exception message (`str(e)`) | `OCC on 'loan-APEX-001': expected v3, actual v4` | Matches `OptimisticConcurrencyError` constructor in `ledger/exceptions.py` |
+
+Raw `pytest` output for **only** this test (`-vv`):
+
+```text
+============================= test session starts =============================
+platform win32 -- Python 3.13.1, pytest-9.0.2, pluggy-1.6.0 -- C:\Program Files\Python313\python.exe
+cachedir: .pytest_cache
+rootdir: C:\Users\liulj\Desktop\10Acadamey\week_5\The-Ledger\starter
+configfile: pytest.ini
+plugins: anyio-4.8.0, Faker-40.11.0, langsmith-0.7.16, asyncio-1.3.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 1 item
+
+tests/test_concurrency.py::test_double_decision_exactly_one_succeeds PASSED [100%]
+
+============================== 1 passed in 0.17s ==============================
+```
+
+Raw, visible test output for these assertions (multi-test run):
 
 ```text
 ============================= test session starts =============================
@@ -295,6 +325,20 @@ Remaining/partial areas relative to ideal enterprise hardening:
 4. **Skips in narrative/infra tests**
    - require additional scenario wiring or environment setup
 
+#### 7.2.1 Feature implementation — command handler & causality gaps (analysis)
+
+**Improved in this iteration**
+
+- **Causal metadata threading:** All command-handler appends go through `_append()` so `correlation_id` / `causation_id` are consistently passed to `EventStore.append`. Each command gets a stable **`correlation_id`** (caller-supplied or auto-generated UUID) for the whole logical operation; **`causation_id`** is optional from the caller, and **multi-stream** flows (e.g. compliance hard block → loan decline, then compliance stream) chain **`causation_id`** to `"{loan_stream}:{last_position}"` after the loan append so downstream events reference the prior write.
+- **Version sourcing:** Documented in-module: loan/agent/compliance use **aggregate `.version`** where modeled; credit/fraud still use **`stream_version` immediately before append** because dedicated stream aggregates are not yet implemented.
+
+**Remaining gaps (honest)**
+
+- **Credit / fraud streams:** No `CreditRecord` / `FraudScreening` aggregate types yet — `expected_version` cannot be sourced from an in-memory aggregate replay; a future `StreamBackedAggregate` or full aggregates would remove the small race window between validation and append.
+- **MCP tools:** Tools do not yet accept `correlation_id` / `causation_id` from clients; handlers always generate a correlation id per invocation unless extended in the MCP layer.
+- **Payload vs store metadata:** Event payloads do not duplicate `correlation_id` inside JSON; correlation lives on stored event metadata (as implemented in `event_store`). If auditors require payload-level IDs, add explicit fields to event schemas.
+- **Strong SLO proof:** Projection lag under **50 concurrent handlers** is targeted in spec but not fully benchmarked with percentile tables in this repo; daemon + tests validate correctness path more than load testing.
+
 ---
 
 ## 8) Concurrency & SLO Analysis (Rubric Item 4)
@@ -304,6 +348,7 @@ Remaining/partial areas relative to ideal enterprise hardening:
 - Condition: two concurrent writers target same stream with same `expected_version`
 - Outcome: exactly one succeeds; one fails with `OptimisticConcurrencyError`
 - Data consistency: preserved, no duplicate acceptance of conflicting write
+- **Quantified outcomes:** See **§7.1.1** (stream length `5`, winner position `4`, loser message `OCC on 'loan-APEX-001': expected v3, actual v4`)
 
 ### Projection Lag Under Load
 

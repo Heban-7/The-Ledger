@@ -1,10 +1,21 @@
 """
 ledger/commands/handlers.py — Command handlers (load → validate → append pattern)
+
+Version sourcing (intended pattern):
+- When an aggregate is loaded for the target stream, use aggregate.version as expected_version.
+- Streams without a dedicated aggregate (credit/fraud today): use store.stream_version(stream_id)
+  immediately before append (after validation), minimizing the race window; callers may pass
+  correlation_id to tie retries to one logical command.
+
+Causal metadata (intended pattern):
+- correlation_id: one id per logical command / user request; threaded to every append in that handler.
+- causation_id: optional; points to a prior event or command (e.g. chained writes). For multi-append
+  handlers, later appends may set causation_id to the prior append's last stream position (string).
 """
 from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
-from decimal import Decimal
+import uuid
 
 from ledger.domain.aggregates.loan_application import LoanApplicationAggregate, ApplicationState
 from ledger.domain.aggregates.agent_session import AgentSessionAggregate
@@ -13,6 +24,35 @@ from ledger.domain.aggregates.compliance_record import ComplianceRecordAggregate
 
 def _ev(event_type: str, event_version: int = 1, **payload) -> dict:
     return {"event_type": event_type, "event_version": event_version, "payload": payload}
+
+
+def _correlation_id(cmd) -> str:
+    """One correlation id per command batch; caller may set cmd.correlation_id for tracing."""
+    cid = getattr(cmd, "correlation_id", None)
+    return cid if cid else str(uuid.uuid4())
+
+
+def _causation_id(cmd) -> str | None:
+    return getattr(cmd, "causation_id", None)
+
+
+async def _append(
+    store,
+    stream_id: str,
+    events: list,
+    *,
+    expected_version: int,
+    correlation_id: str | None = None,
+    causation_id: str | None = None,
+):
+    """Single append entry point so causal metadata is never dropped."""
+    return await store.append(
+        stream_id,
+        events,
+        expected_version=expected_version,
+        correlation_id=correlation_id,
+        causation_id=causation_id,
+    )
 
 
 # ─── Commands (input DTOs) ────────────────────────────────────────────────────
@@ -27,6 +67,8 @@ class SubmitApplicationCommand:
     submission_channel: str = "api"
     contact_email: str = ""
     contact_name: str = ""
+    correlation_id: str | None = None
+    causation_id: str | None = None
 
 
 @dataclass
@@ -54,6 +96,7 @@ class FraudScreeningCompletedCommand:
     model_version: str
     input_data_hash: str
     correlation_id: str | None = None
+    causation_id: str | None = None
 
 
 @dataclass
@@ -64,6 +107,8 @@ class StartAgentSessionCommand:
     model_version: str
     context_source: str = "fresh"
     context_token_count: int = 0
+    correlation_id: str | None = None
+    causation_id: str | None = None
 
 
 @dataclass
@@ -75,6 +120,8 @@ class ComplianceCheckCommand:
     failure_reason: str = ""
     is_hard_block: bool = False
     rule_version: str = "2026-Q1-v1"
+    correlation_id: str | None = None
+    causation_id: str | None = None
 
 
 @dataclass
@@ -85,6 +132,8 @@ class GenerateDecisionCommand:
     approved_amount_usd: float | None = None
     orchestrator_session_id: str = "mcp-orch"
     agent_type: str = "decision_orchestrator"
+    correlation_id: str | None = None
+    causation_id: str | None = None
 
 
 @dataclass
@@ -94,6 +143,8 @@ class HumanReviewCompletedCommand:
     final_decision: str
     override: bool = False
     override_reason: str = ""
+    correlation_id: str | None = None
+    causation_id: str | None = None
 
 
 # Regulation set for compliance (rule_id must be in this set)
@@ -106,6 +157,8 @@ REGULATION_SET = {"REG-001", "REG-002", "REG-003", "REG-004", "REG-005", "REG-00
 async def handle_submit_application(cmd: SubmitApplicationCommand, store) -> tuple[str, int]:
     """Append ApplicationSubmitted and DocumentUploadRequested to loan stream."""
     stream_id = f"loan-{cmd.application_id}"
+    cid = _correlation_id(cmd)
+    cause = _causation_id(cmd)
     app = await LoanApplicationAggregate.load(store, cmd.application_id)
     if app.version >= 0:
         from ledger.exceptions import DomainError
@@ -134,12 +187,21 @@ async def handle_submit_application(cmd: SubmitApplicationCommand, store) -> tup
             requested_by="system",
         ),
     ]
-    await store.append(stream_id, events, expected_version=app.version)
+    await _append(
+        store,
+        stream_id,
+        events,
+        expected_version=app.version,
+        correlation_id=cid,
+        causation_id=cause,
+    )
     return stream_id, 1
 
 
 async def handle_credit_analysis_completed(cmd: CreditAnalysisCompletedCommand, store) -> tuple[str, int]:
     """Append CreditAnalysisCompleted to credit stream. Validates LoanApplication and AgentSession."""
+    cid = _correlation_id(cmd)
+    cause = _causation_id(cmd)
     app = await LoanApplicationAggregate.load(store, cmd.application_id)
     app.assert_awaiting_credit_analysis()
 
@@ -171,20 +233,23 @@ async def handle_credit_analysis_completed(cmd: CreditAnalysisCompletedCommand, 
         completed_at=datetime.now(timezone.utc).isoformat(),
     )
 
-    # CreditRecord aggregate is not yet modeled, so stream version is source of truth.
+    # No CreditRecord aggregate yet: expected_version = store.stream_version immediately before append.
     version = await store.stream_version(stream_id)
-    positions = await store.append(
+    positions = await _append(
+        store,
         stream_id,
         [new_event],
         expected_version=version,
-        correlation_id=cmd.correlation_id,
-        causation_id=cmd.causation_id,
+        correlation_id=cid,
+        causation_id=cause,
     )
     return stream_id, positions[-1]
 
 
 async def handle_fraud_screening_completed(cmd: FraudScreeningCompletedCommand, store) -> tuple[str, int]:
     """Append FraudScreeningCompleted to fraud stream."""
+    cid = _correlation_id(cmd)
+    cause = _causation_id(cmd)
     app = await LoanApplicationAggregate.load(store, cmd.application_id)
     app.assert_awaiting_fraud_screening()
 
@@ -204,14 +269,22 @@ async def handle_fraud_screening_completed(cmd: FraudScreeningCompletedCommand, 
         input_data_hash=cmd.input_data_hash,
         completed_at=datetime.now(timezone.utc).isoformat(),
     )
-    # FraudScreening aggregate is not yet modeled, so stream version is source of truth.
     version = await store.stream_version(stream_id)
-    positions = await store.append(stream_id, [new_event], expected_version=version)
+    positions = await _append(
+        store,
+        stream_id,
+        [new_event],
+        expected_version=version,
+        correlation_id=cid,
+        causation_id=cause,
+    )
     return stream_id, positions[-1]
 
 
 async def handle_start_agent_session(cmd: StartAgentSessionCommand, store) -> tuple[str, int]:
     """Append AgentSessionStarted — Gas Town: required before any agent decision."""
+    cid = _correlation_id(cmd)
+    cause = _causation_id(cmd)
     stream_id = f"agent-{cmd.agent_type}-{cmd.session_id}"
     agent = await AgentSessionAggregate.load(store, cmd.agent_type, cmd.session_id)
     if agent.version >= 0:
@@ -230,13 +303,23 @@ async def handle_start_agent_session(cmd: StartAgentSessionCommand, store) -> tu
         context_token_count=cmd.context_token_count,
         started_at=datetime.now(timezone.utc).isoformat(),
     )
-    positions = await store.append(stream_id, [new_event], expected_version=agent.version)
+    positions = await _append(
+        store,
+        stream_id,
+        [new_event],
+        expected_version=agent.version,
+        correlation_id=cid,
+        causation_id=cause,
+    )
     return stream_id, positions[-1]
 
 
 async def handle_compliance_check(cmd: ComplianceCheckCommand, store) -> tuple[str, int]:
     """Append ComplianceRulePassed or ComplianceRuleFailed to compliance stream."""
     from ledger.exceptions import DomainError
+
+    cid = _correlation_id(cmd)
+    cause = _causation_id(cmd)
 
     if cmd.rule_id not in REGULATION_SET:
         raise DomainError(f"rule_id {cmd.rule_id} not in regulation set", rule="invalid_rule_id")
@@ -290,7 +373,8 @@ async def handle_compliance_check(cmd: ComplianceCheckCommand, store) -> tuple[s
         events.append(evt)
         if cmd.is_hard_block:
             loan_stream = f"loan-{cmd.application_id}"
-            await store.append(
+            loan_positions = await _append(
+                store,
                 loan_stream,
                 [
                     _ev("ComplianceRuleFailed", application_id=cmd.application_id, rule_id=cmd.rule_id, is_hard_block=True),
@@ -303,16 +387,29 @@ async def handle_compliance_check(cmd: ComplianceCheckCommand, store) -> tuple[s
                     ),
                 ],
                 expected_version=app.version,
+                correlation_id=cid,
+                causation_id=cause,
             )
+            cause = f"{loan_stream}:{loan_positions[-1]}"
 
     exp = -1 if version < 0 else version
-    positions = await store.append(stream_id, events, expected_version=exp)
+    positions = await _append(
+        store,
+        stream_id,
+        events,
+        expected_version=exp,
+        correlation_id=cid,
+        causation_id=cause,
+    )
     return stream_id, positions[-1]
 
 
 async def handle_generate_decision(cmd: GenerateDecisionCommand, store) -> tuple[str, int]:
     """Append DecisionGenerated; optionally ApplicationApproved/Declined or HumanReviewRequested."""
     from ledger.exceptions import DomainError
+
+    cid = _correlation_id(cmd)
+    cause = _causation_id(cmd)
 
     app = await LoanApplicationAggregate.load(store, cmd.application_id)
     if app.state not in (ApplicationState.COMPLIANCE_CHECK_REQUESTED, ApplicationState.COMPLIANCE_CHECK_COMPLETE, ApplicationState.PENDING_DECISION):
@@ -393,13 +490,23 @@ async def handle_generate_decision(cmd: GenerateDecisionCommand, store) -> tuple
             )
         )
 
-    positions = await store.append(stream_id, events, expected_version=version)
+    positions = await _append(
+        store,
+        stream_id,
+        events,
+        expected_version=version,
+        correlation_id=cid,
+        causation_id=cause,
+    )
     return stream_id, positions[-1]
 
 
 async def handle_human_review_completed(cmd: HumanReviewCompletedCommand, store) -> tuple[str, int]:
     """Append HumanReviewCompleted and ApplicationApproved/Declined."""
     from ledger.exceptions import DomainError
+
+    cid = _correlation_id(cmd)
+    cause = _causation_id(cmd)
 
     if cmd.override and not cmd.override_reason:
         raise DomainError("override=True requires override_reason", rule="override_reason_required")
@@ -447,5 +554,12 @@ async def handle_human_review_completed(cmd: HumanReviewCompletedCommand, store)
             )
         )
 
-    positions = await store.append(stream_id, events, expected_version=version)
+    positions = await _append(
+        store,
+        stream_id,
+        events,
+        expected_version=version,
+        correlation_id=cid,
+        causation_id=cause,
+    )
     return stream_id, positions[-1]

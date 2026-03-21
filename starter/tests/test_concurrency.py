@@ -44,7 +44,7 @@ async def test_double_decision_exactly_one_succeeds():
             results.append("success")
             winner_positions.extend(positions)
         except OptimisticConcurrencyError as e:
-            results.append(("occ", e.stream_id, e.expected, e.actual))
+            results.append(("occ", e.stream_id, e.expected, e.actual, str(e)))
 
     await asyncio.gather(agent_attempt(), agent_attempt())
 
@@ -65,3 +65,4 @@ async def test_double_decision_exactly_one_succeeds():
     assert occ_result[0] == "occ"
     assert occ_result[2] == 3  # expected
     assert occ_result[3] == 4  # actual (winner advanced it)
+    assert occ_result[4] == "OCC on 'loan-APEX-001': expected v3, actual v4"
