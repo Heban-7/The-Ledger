@@ -48,3 +48,7 @@ class AgentPerformanceProjection(Projection):
         if model_version:
             return [self._rows[self._key(agent_id, model_version)]] if self._key(agent_id, model_version) in self._rows else []
         return [r for k, r in self._rows.items() if k[0] == agent_id]
+
+    def rebuild_from_scratch(self) -> None:
+        """Clear metrics so the projection can replay from scratch."""
+        self._rows.clear()

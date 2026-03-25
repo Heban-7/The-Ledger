@@ -180,3 +180,7 @@ class ApplicationSummaryProjection(Projection):
 
     def get(self, application_id: str) -> dict | None:
         return self._rows.get(application_id)
+
+    def rebuild_from_scratch(self) -> None:
+        """Clear all rows so the projection can replay from checkpoint=-1."""
+        self._rows.clear()

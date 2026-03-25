@@ -269,6 +269,15 @@ class EventStore:
         )
         return int(row["last_position"]) if row else -1
 
+    async def reset_checkpoint(self, projection_name: str) -> None:
+        """Reset checkpoint so projections replay from the beginning."""
+        if not self._pool:
+            raise RuntimeError("EventStore not connected")
+        await self._pool.execute(
+            "DELETE FROM projection_checkpoints WHERE projection_name = $1",
+            projection_name,
+        )
+
     async def get_max_global_position(self) -> int:
         """Returns the highest global_position in events. For lag calculation."""
         if not self._pool:
@@ -293,6 +302,8 @@ class InMemoryEventStore:
         self._streams: dict[str, list[dict]] = defaultdict(list)
         self._versions: dict[str, int] = {}
         self._global: list[dict] = []
+        # Protect global_position assignment when many streams append concurrently.
+        self._global_lock = asyncio.Lock()
         self._checkpoints: dict[str, int] = {}
         self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
@@ -320,23 +331,26 @@ class InMemoryEventStore:
                 meta["correlation_id"] = correlation_id
 
             positions = []
-            for i, event in enumerate(events):
-                pos = current + 1 + i
-                stored = {
-                    "event_id": str(uuid4()),
-                    "stream_id": stream_id,
-                    "stream_position": pos,
-                    # 1-based sequence (matches PostgreSQL SERIAL on `events.global_position`)
-                    "global_position": len(self._global) + 1,
-                    "event_type": event.get("event_type", "Unknown"),
-                    "event_version": event.get("event_version", 1),
-                    "payload": dict(event.get("payload", {})),
-                    "metadata": meta,
-                    "recorded_at": datetime.now(timezone.utc).isoformat(),
-                }
-                self._streams[stream_id].append(stored)
-                self._global.append(stored)
-                positions.append(pos)
+            # global_position must be globally unique and ordered, even with concurrent
+            # appends to different streams.
+            async with self._global_lock:
+                for i, event in enumerate(events):
+                    pos = current + 1 + i
+                    stored = {
+                        "event_id": str(uuid4()),
+                        "stream_id": stream_id,
+                        "stream_position": pos,
+                        # 1-based sequence (matches PostgreSQL SERIAL on `events.global_position`)
+                        "global_position": len(self._global) + 1,
+                        "event_type": event.get("event_type", "Unknown"),
+                        "event_version": event.get("event_version", 1),
+                        "payload": dict(event.get("payload", {})),
+                        "metadata": meta,
+                        "recorded_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                    self._streams[stream_id].append(stored)
+                    self._global.append(stored)
+                    positions.append(pos)
 
             self._versions[stream_id] = current + len(events)
             return positions
@@ -367,6 +381,7 @@ class InMemoryEventStore:
     ) -> AsyncGenerator[dict, None]:
         start = from_position if from_position is not None else from_global_position
         # Match PostgreSQL: WHERE global_position > $checkpoint (exclusive) so checkpoints do not double-process.
+        yielded = 0
         for e in self._global:
             if e["global_position"] > start:
                 if event_types and e.get("event_type") not in event_types:
@@ -375,6 +390,9 @@ class InMemoryEventStore:
                 if self.upcasters:
                     ev = self.upcasters.upcast(ev)
                 yield ev
+                yielded += 1
+                if yielded >= batch_size:
+                    break
 
     async def get_event(self, event_id: str | UUID) -> dict | None:
         eid = str(event_id)
@@ -406,6 +424,9 @@ class InMemoryEventStore:
 
     async def load_checkpoint(self, projection_name: str) -> int:
         return self._checkpoints.get(projection_name, -1)
+
+    async def reset_checkpoint(self, projection_name: str) -> None:
+        self._checkpoints.pop(projection_name, None)
 
     async def get_max_global_position(self) -> int:
         return len(self._global) if self._global else 0
