@@ -1,7 +1,43 @@
 """
 ledger/exceptions.py — Domain and store exceptions
+
+The exceptions themselves are classic Python exceptions, but they also expose
+a typed Pydantic representation via `to_structured()` for MCP/LLM retry logic.
 """
+
 from __future__ import annotations
+
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict
+
+
+class StructuredErrorBase(BaseModel):
+    """Common stable error envelope used by MCP and LLM clients."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    error_type: str
+    message: str
+    suggested_action: str | None = None
+
+
+class OptimisticConcurrencyErrorDetails(StructuredErrorBase):
+    error_type: Literal["OptimisticConcurrencyError"] = "OptimisticConcurrencyError"
+    stream_id: str
+    expected_version: int
+    actual_version: int
+    suggested_action: Literal["reload_stream_and_retry"] = "reload_stream_and_retry"
+
+
+class DomainErrorDetails(StructuredErrorBase):
+    error_type: Literal["DomainError"] = "DomainError"
+    rule: str | None = None
+
+
+class PreconditionFailedErrorDetails(StructuredErrorBase):
+    error_type: Literal["PreconditionFailed"] = "PreconditionFailed"
+    precondition: str | None = None
 
 
 class OptimisticConcurrencyError(Exception):
@@ -15,14 +51,12 @@ class OptimisticConcurrencyError(Exception):
 
     def to_structured(self) -> dict:
         """Structured error for LLM consumption."""
-        return {
-            "error_type": "OptimisticConcurrencyError",
-            "message": str(self),
-            "stream_id": self.stream_id,
-            "expected_version": self.expected,
-            "actual_version": self.actual,
-            "suggested_action": "reload_stream_and_retry",
-        }
+        return OptimisticConcurrencyErrorDetails(
+            message=str(self),
+            stream_id=self.stream_id,
+            expected_version=self.expected,
+            actual_version=self.actual,
+        ).model_dump(exclude_none=True)
 
 
 class DomainError(Exception):
@@ -33,11 +67,7 @@ class DomainError(Exception):
         super().__init__(message)
 
     def to_structured(self) -> dict:
-        return {
-            "error_type": "DomainError",
-            "message": str(self),
-            "rule": self.rule,
-        }
+        return DomainErrorDetails(message=str(self), rule=self.rule).model_dump(exclude_none=True)
 
 
 class PreconditionFailedError(Exception):
@@ -48,8 +78,6 @@ class PreconditionFailedError(Exception):
         super().__init__(message)
 
     def to_structured(self) -> dict:
-        return {
-            "error_type": "PreconditionFailed",
-            "message": str(self),
-            "precondition": self.precondition,
-        }
+        return PreconditionFailedErrorDetails(message=str(self), precondition=self.precondition).model_dump(
+            exclude_none=True
+        )
