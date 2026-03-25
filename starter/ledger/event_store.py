@@ -326,7 +326,8 @@ class InMemoryEventStore:
                     "event_id": str(uuid4()),
                     "stream_id": stream_id,
                     "stream_position": pos,
-                    "global_position": len(self._global),
+                    # 1-based sequence (matches PostgreSQL SERIAL on `events.global_position`)
+                    "global_position": len(self._global) + 1,
                     "event_type": event.get("event_type", "Unknown"),
                     "event_version": event.get("event_version", 1),
                     "payload": dict(event.get("payload", {})),
@@ -365,8 +366,9 @@ class InMemoryEventStore:
         batch_size: int = 500,
     ) -> AsyncGenerator[dict, None]:
         start = from_position if from_position is not None else from_global_position
+        # Match PostgreSQL: WHERE global_position > $checkpoint (exclusive) so checkpoints do not double-process.
         for e in self._global:
-            if e["global_position"] >= start:
+            if e["global_position"] > start:
                 if event_types and e.get("event_type") not in event_types:
                     continue
                 ev = dict(e)
@@ -406,4 +408,4 @@ class InMemoryEventStore:
         return self._checkpoints.get(projection_name, -1)
 
     async def get_max_global_position(self) -> int:
-        return len(self._global) - 1 if self._global else 0
+        return len(self._global) if self._global else 0

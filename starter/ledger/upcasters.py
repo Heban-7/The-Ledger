@@ -1,13 +1,18 @@
 """
-ledger/upcasters.py — UpcasterRegistry
+ledger/upcasters.py — UpcasterRegistry (canonical)
 
 Upcasters transform old event versions to the current version ON READ.
 They NEVER write to the events table. Immutability is non-negotiable.
 
-CreditAnalysisCompleted v1→v2: model_version (infer "legacy-pre-2026"), confidence_score (null), regulatory_basis ([])
-DecisionGenerated v1→v2: model_versions={}
+Chains: CreditAnalysisCompleted v1→v2, DecisionGenerated v1→v2 (extend with TARGET_VERSION + steps).
 """
 from __future__ import annotations
+
+# Current catalogue version per event type (extend as schema evolves)
+TARGET_EVENT_VERSION: dict[str, int] = {
+    "CreditAnalysisCompleted": 2,
+    "DecisionGenerated": 2,
+}
 
 
 class UpcasterRegistry:
@@ -17,7 +22,7 @@ class UpcasterRegistry:
         self._upcasters: dict[str, dict[int, callable]] = {}
 
     def register(self, event_type: str, from_version: int):
-        """Decorator to register an upcaster function."""
+        """Decorator to register an upcaster: from_version -> from_version+1 payload shape."""
 
         def decorator(fn):
             self._upcasters.setdefault(event_type, {})[from_version] = fn
@@ -26,27 +31,30 @@ class UpcasterRegistry:
         return decorator
 
     def upcast(self, event: dict) -> dict:
-        """Apply chain of upcasters until latest version reached."""
+        """Apply registered upcasters, then built-ins, until target version reached."""
+        e = dict(event)
+        et = e.get("event_type")
+        target = TARGET_EVENT_VERSION.get(et, e.get("event_version", 1))
+
+        for _ in range(32):
+            ver = e.get("event_version", 1)
+            if ver >= target:
+                break
+            chain = self._upcasters.get(et, {})
+            if ver in chain:
+                e = dict(e)
+                e["payload"] = chain[ver](dict(e.get("payload", {})))
+                e["event_version"] = ver + 1
+                continue
+            e = self._builtin_upcast_one(e)
+            if e.get("event_version", 1) == ver:
+                break
+        return e
+
+    def _builtin_upcast_one(self, event: dict) -> dict:
+        """Single-step built-in migration."""
         et = event.get("event_type")
         ver = event.get("event_version", 1)
-        chain = self._upcasters.get(et, {})
-
-        # Use built-in upcasters if no custom ones registered
-        if not chain:
-            return self._builtin_upcast(event)
-
-        while ver in chain:
-            event = dict(event)
-            event["payload"] = chain[ver](dict(event.get("payload", {})))
-            ver += 1
-            event["event_version"] = ver
-        return event
-
-    def _builtin_upcast(self, event: dict) -> dict:
-        """Built-in upcasters for CreditAnalysisCompleted and DecisionGenerated."""
-        et = event.get("event_type")
-        ver = event.get("event_version", 1)
-
         if et == "CreditAnalysisCompleted" and ver < 2:
             event = dict(event)
             event["event_version"] = 2
@@ -55,17 +63,17 @@ class UpcasterRegistry:
             p.setdefault("confidence_score", None)
             p.setdefault("regulatory_basis", [])
             event["payload"] = p
-
+            return event
         if et == "DecisionGenerated" and ver < 2:
             event = dict(event)
             event["event_version"] = 2
             p = dict(event.get("payload", {}))
             p.setdefault("model_versions", {})
             event["payload"] = p
-
+            return event
         return event
 
 
 def create_default_registry() -> UpcasterRegistry:
-    """Returns UpcasterRegistry with built-in upcasters (always applied)."""
+    """Returns UpcasterRegistry with built-in chains."""
     return UpcasterRegistry()
