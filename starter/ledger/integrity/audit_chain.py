@@ -40,6 +40,7 @@ class IntegrityCheckResult:
     chain_valid: bool
     tamper_detected: bool
     integrity_hash: str
+    full_replay_integrity_hash: str
     previous_hash: str | None
 
 
@@ -55,11 +56,13 @@ async def run_integrity_check(
     events = await store.load_stream(stream_id)
 
     previous_hash = None
+    previous_full_replay: str | None = None
     events_to_hash: list[dict] = []
     for ev in events:
         if ev.get("event_type") == "AuditIntegrityCheckRun":
             p = ev.get("payload", {})
             previous_hash = p.get("integrity_hash")
+            previous_full_replay = p.get("full_replay_integrity_hash")
             events_to_hash = []
         else:
             events_to_hash.append(ev)
@@ -82,6 +85,10 @@ async def run_integrity_check(
         full_h = rolling_hash(full_h, ev)
     full_replay = full_h or hashlib.sha256(b"").hexdigest()
     tamper_detected = False
+    if previous_full_replay is not None and full_replay != previous_full_replay:
+        # If any prior non-checkpoint event changed, the full replay hash must drift.
+        tamper_detected = True
+    chain_valid = not tamper_detected
 
     new_event = {
         "event_type": "AuditIntegrityCheckRun",
@@ -93,7 +100,7 @@ async def run_integrity_check(
             "events_verified_count": len(events_to_hash),
             "integrity_hash": new_hash,
             "previous_hash": previous_hash,
-            "chain_valid": True,
+            "chain_valid": chain_valid,
             "tamper_detected": tamper_detected,
             "full_replay_integrity_hash": full_replay,
         },
@@ -103,9 +110,10 @@ async def run_integrity_check(
 
     return IntegrityCheckResult(
         events_verified=len(events_to_hash),
-        chain_valid=True,
+        chain_valid=chain_valid,
         tamper_detected=tamper_detected,
         integrity_hash=new_hash,
+        full_replay_integrity_hash=full_replay,
         previous_hash=previous_hash,
     )
 

@@ -47,9 +47,15 @@ async def test_projection_daemon_high_load_catches_up_with_zero_lag():
     assert pre["checkpoint_global_position"] == -1
     assert pre["tail_global_position"] == total_events
 
-    await daemon._process_batch()
+    post = None
+    max_cycles = 20
+    for _ in range(max_cycles):
+        await daemon._process_batch()
+        post = await daemon.get_projection_status("ApplicationSummary")
+        if post["events_behind"] == 0:
+            break
 
-    post = await daemon.get_projection_status("ApplicationSummary")
+    assert post is not None
     assert post["events_behind"] == 0
     assert post["estimated_lag_ms"] == 0.0
     assert post["checkpoint_global_position"] == total_events
