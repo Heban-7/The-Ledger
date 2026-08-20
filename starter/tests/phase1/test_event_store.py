@@ -139,9 +139,18 @@ async def test_all_seed_event_types_validate():
     from pathlib import Path
     from ledger.schema.events import EVENT_REGISTRY
 
-    seed_file = Path("data/seed_events.jsonl")
-    if not seed_file.exists():
-        pytest.skip("data/seed_events.jsonl not found — run datagen first")
+    seed_file = None
+    for cand in [
+        Path("data/seed_events.jsonl"),
+        Path("starter/data/seed_events.jsonl"),
+        Path(__file__).parent.parent.parent / "data" / "seed_events.jsonl",
+    ]:
+        if cand.exists():
+            seed_file = cand
+            break
+
+    if seed_file is None:
+        pytest.skip("seed_events.jsonl not found — run datagen first")
 
     errors = []
     validated = 0
