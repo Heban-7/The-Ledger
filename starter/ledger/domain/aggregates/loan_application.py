@@ -96,6 +96,9 @@ class LoanApplicationAggregate:
     def _on_DocumentUploaded(self, p: dict) -> None:
         self._transition(ApplicationState.DOCUMENTS_UPLOADED)
 
+    def _on_DocumentsProcessed(self, p: dict) -> None:
+        self._transition(ApplicationState.DOCUMENTS_PROCESSED)
+
     def _on_CreditAnalysisRequested(self, p: dict) -> None:
         self._transition(ApplicationState.CREDIT_ANALYSIS_REQUESTED)
 

@@ -6,6 +6,8 @@ We run audit integrity checks, mutate stored event payloads, and assert:
 - full replay hash validation is consistent end-to-end
 """
 
+import json
+
 import pytest
 
 from ledger.event_store import InMemoryEventStore
@@ -64,4 +66,27 @@ async def test_integrity_check_detects_payload_tampering_via_full_replay_hash():
     events = await store.load_stream(stream_id)
     last_cp = next(e for e in reversed(events) if e.get("event_type") == "AuditIntegrityCheckRun")
     assert last_cp.get("payload", {}).get("tamper_detected") is True
+
+    print(
+        json.dumps(
+            {
+                "test": "integrity_tamper_detection",
+                "baseline_checkpoint": {
+                    "chain_valid": r1.chain_valid,
+                    "tamper_detected": r1.tamper_detected,
+                    "events_verified": r1.events_verified,
+                    "integrity_hash": r1.integrity_hash,
+                    "full_replay_integrity_hash": r1.full_replay_integrity_hash,
+                },
+                "after_mutation": {
+                    "chain_valid": r2.chain_valid,
+                    "tamper_detected": r2.tamper_detected,
+                    "events_verified": r2.events_verified,
+                    "integrity_hash": r2.integrity_hash,
+                    "full_replay_integrity_hash": r2.full_replay_integrity_hash,
+                },
+            },
+            indent=2,
+        )
+    )
 

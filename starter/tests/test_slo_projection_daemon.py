@@ -8,6 +8,8 @@ Goals:
 """
 
 import asyncio
+import json
+import time
 
 import pytest
 
@@ -33,6 +35,8 @@ async def test_slo_projection_daemon_high_concurrency_rebuild_from_scratch():
     async def _writer(i: int) -> None:
         app_id = f"APP-SLO-{i:04d}"
         stream_id = f"loan-{app_id}"
+        # Split writes into two phases to keep backlog non-trivial longer,
+        # so rebuild_from_scratch can happen while writers are still in-flight.
         expected = await store.stream_version(stream_id)  # should be -1 initially
         await store.append(
             stream_id,
@@ -45,6 +49,14 @@ async def test_slo_projection_daemon_high_concurrency_rebuild_from_scratch():
                 ),
                 _ev("DocumentUploadRequested", application_id=app_id),
                 _ev("DocumentUploaded", application_id=app_id),
+            ],
+            expected_version=expected,
+        )
+        await asyncio.sleep(0.003)
+        expected2 = await store.stream_version(stream_id)
+        await store.append(
+            stream_id,
+            [
                 _ev("CreditAnalysisRequested", application_id=app_id),
                 _ev(
                     "CreditAnalysisCompleted",
@@ -52,7 +64,7 @@ async def test_slo_projection_daemon_high_concurrency_rebuild_from_scratch():
                     decision={"risk_tier": "HIGH"},
                 ),
             ],
-            expected_version=expected,
+            expected_version=expected2,
         )
 
     writers = [asyncio.create_task(_writer(i)) for i in range(n_streams)]
@@ -62,6 +74,11 @@ async def test_slo_projection_daemon_high_concurrency_rebuild_from_scratch():
     cycle = 0
     max_cycles = 60
     prev_events_behind = None
+    peak_events_behind = None
+    peak_estimated_lag_ms = None
+    rebuild_cycle = None
+    t0 = time.perf_counter()
+    t_end = None
 
     while True:
         cycle += 1
@@ -70,6 +87,9 @@ async def test_slo_projection_daemon_high_concurrency_rebuild_from_scratch():
         status = await daemon.get_projection_status("ApplicationSummary")
         events_behind = status["events_behind"]
         assert status["estimated_lag_ms"] == float(events_behind * 2.0)
+        if peak_events_behind is None or events_behind > peak_events_behind:
+            peak_events_behind = events_behind
+            peak_estimated_lag_ms = status["estimated_lag_ms"]
 
         all_writers_done = all(t.done() for t in writers)
         if not rebuilt and cycle >= 3 and not all_writers_done:
@@ -77,6 +97,7 @@ async def test_slo_projection_daemon_high_concurrency_rebuild_from_scratch():
             proj.rebuild_from_scratch()
             await store.reset_checkpoint("ApplicationSummary")
             rebuilt = True
+            rebuild_cycle = cycle
             assert proj.get(sample_app_after_rebuild) is None
 
         if all_writers_done:
@@ -85,6 +106,7 @@ async def test_slo_projection_daemon_high_concurrency_rebuild_from_scratch():
             prev_events_behind = events_behind
 
             if events_behind == 0:
+                t_end = time.perf_counter()
                 break
 
         if cycle >= max_cycles:
@@ -96,6 +118,23 @@ async def test_slo_projection_daemon_high_concurrency_rebuild_from_scratch():
         await asyncio.sleep(0.001)
 
     # Post-conditions: projection matches the latest lifecycle events.
+    print(
+        json.dumps(
+            {
+                "test": "slo_projection_daemon_high_concurrency_rebuild_from_scratch",
+                "n_streams": n_streams,
+                "events_per_stream": events_per_stream,
+                "total_events": total_events,
+                "rebuild_cycle": rebuild_cycle,
+                "peak_events_behind": peak_events_behind,
+                "peak_estimated_lag_ms": peak_estimated_lag_ms,
+                "total_catchup_ms": None if t_end is None else (t_end - t0) * 1000.0,
+                "final_events_behind": status["events_behind"],
+                "final_checkpoint_global_position": status["checkpoint_global_position"],
+            },
+            indent=2,
+        )
+    )
     for i in (0, n_streams // 2, n_streams - 1):
         app_id = f"APP-SLO-{i:04d}"
         row = proj.get(app_id)

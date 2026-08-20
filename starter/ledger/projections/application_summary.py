@@ -158,7 +158,7 @@ class ApplicationSummaryProjection(Projection):
             _set_state(row, "COMPLIANCE_CHECK_REQUESTED", recorded_at)
         elif et == "ComplianceCheckCompleted":
             _set_state(row, "COMPLIANCE_CHECK_COMPLETE", recorded_at)
-            row["compliance_status"] = p.get("overall_verdict", "PENDING")
+            row["compliance_status"] = p.get("overall_verdict", p.get("verdict", "PENDING"))
         elif et == "DecisionRequested":
             _set_state(row, "PENDING_DECISION", recorded_at)
         elif et == "DecisionGenerated":
@@ -180,6 +180,9 @@ class ApplicationSummaryProjection(Projection):
 
     def get(self, application_id: str) -> dict | None:
         return self._rows.get(application_id)
+
+    def get_application(self, application_id: str) -> dict | None:
+        return self.get(application_id)
 
     def rebuild_from_scratch(self) -> None:
         """Clear all rows so the projection can replay from checkpoint=-1."""

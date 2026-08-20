@@ -32,11 +32,17 @@ class ComplianceAuditProjection(Projection):
         events = self._by_app.get(application_id, [])
         return {"application_id": application_id, "events": events}
 
-    def get_compliance_at(self, application_id: str, timestamp: datetime) -> dict:
+    def get_compliance_at(self, application_id: str, timestamp: datetime | str) -> dict:
         events = self._by_app.get(application_id, [])
-        ts = timestamp.timestamp() if hasattr(timestamp, "timestamp") else float(timestamp)
+        ts = _parse_ts(timestamp)
         filtered = [e for e in events if _parse_ts(e.get("recorded_at", 0)) <= ts]
-        return {"application_id": application_id, "events": filtered, "as_of": timestamp}
+        as_of_out = timestamp.isoformat() if hasattr(timestamp, "isoformat") else str(timestamp)
+        return {"application_id": application_id, "events": filtered, "as_of": as_of_out}
+
+    def get_compliance(self, application_id: str, as_of: datetime | str | None = None) -> dict:
+        if as_of:
+            return self.get_compliance_at(application_id, as_of)
+        return self.get_current_compliance(application_id)
 
     def rebuild_from_scratch(self) -> None:
         self._by_app.clear()

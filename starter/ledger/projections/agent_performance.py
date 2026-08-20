@@ -22,7 +22,7 @@ class AgentPerformanceProjection(Projection):
         et = event.get("event_type")
         p = event.get("payload", {})
         agent_id = p.get("agent_id") or p.get("agent_type") or "unknown"
-        model_version = p.get("model_version") or "unknown"
+        model_version = p.get("model_version") or p.get("screening_model_version") or "unknown"
         key = self._key(agent_id, model_version)
         row = self._rows.setdefault(key, {
             "agent_id": agent_id,
@@ -52,3 +52,6 @@ class AgentPerformanceProjection(Projection):
     def rebuild_from_scratch(self) -> None:
         """Clear metrics so the projection can replay from scratch."""
         self._rows.clear()
+
+
+AgentPerformanceLedgerProjection = AgentPerformanceProjection
