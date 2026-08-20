@@ -8,6 +8,8 @@
 [![Architecture](https://img.shields.io/badge/architecture-CQRS%20%2B%20Event%20Sourcing-gold.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
+![The Ledger Banner](assets/thumbnail.jpg)
+
 An enterprise-grade, append-only **Event Sourcing and CQRS Audit Infrastructure** built specifically for autonomous multi-agent financial systems (commercial lending, credit underwriting, fraud detection, and regulatory compliance).
 
 ---
