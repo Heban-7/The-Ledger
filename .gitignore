@@ -1,35 +1,74 @@
-# Python
+# Byte-compiled / optimized / DLL files
 __pycache__/
+**/__pycache__/
 *.py[cod]
+*$py.class
 *.pyo
 *.pyd
-.Python
+
+# Virtual Environments
 .venv/
 venv/
+ENV/
+env/
 
-# Test / coverage
+# Testing & Coverage
 .pytest_cache/
+**/.pytest_cache/
 .coverage
+.coverage.*
 htmlcov/
+coverage.xml
+*.cover
+.hypothesis/
 
-# IDE / editor
-.idea/
-.vscode/
-*.swp
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Env and secrets
+# Environment variables and secrets
 .env
 .env.*
 !.env.example
+*.pem
+*.key
+credentials.json
 
-# Build artifacts
+# IDEs and Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.sublime-workspace
+*.sublime-project
+.cursor/
+
+# Operating System files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# Packaging and distribution
 build/
 dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
 *.egg-info/
+.installed.cfg
+*.egg
 
-# Logs
+# Logs and databases
 *.log
+*.sqlite
+*.sqlite3
+*.db
+pgdata/
