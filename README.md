@@ -233,7 +233,7 @@ The system includes automated scenario integration tests validating real-world e
 ### Option A: Quickstart with Docker Compose (Recommended)
 ```bash
 # 1. Clone repository
-git clone https://github.com/<your-username>/The-Ledger.git
+git clone https://github.com/Heban-7/The-Ledger.git
 cd The-Ledger
 
 # 2. Start PostgreSQL 16 with preloaded schema
